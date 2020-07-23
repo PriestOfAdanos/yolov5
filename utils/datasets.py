@@ -49,7 +49,7 @@ def exif_size(img):
 def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=False, cache=False, pad=0.0, rect=False, local_rank=-1, world_size=1):
     # Make sure only the first process in DDP process the dataset first, and the following others can use the cache.
     with torch_distributed_zero_first(local_rank):
-        dataset = LoadImagesAndLabels(path, imgsz, batch_size,
+        dataset = LoadImagesAndGenerateLabelsFromSegMask(path, imgsz, batch_size,
                                     augment=augment,  # augment images
                                     hyp=hyp,  # augmentation hyperparameters
                                     rect=rect,  # rectangular training
@@ -66,7 +66,7 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                              num_workers=nw,
                                              sampler=train_sampler,
                                              pin_memory=True,
-                                             collate_fn=LoadImagesAndLabels.collate_fn)
+                                             collate_fn=LoadImagLoadImagesAndGenerateLabelsFromSegMaskesAndLabels.collate_fn)
     return dataloader, dataset
 
 
@@ -906,3 +906,68 @@ def create_folder(path='./new_folder'):
     if os.path.exists(path):
         shutil.rmtree(path)  # delete output folder
     os.makedirs(path)  # make new output folder
+
+
+class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
+    def __init__(self,self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
+                 cache_images=False, single_cls=False, stride=32, pad=0.0):
+        super().__init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
+                 cache_images=False, single_cls=False, stride=32, pad=0.0)
+
+    self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.png') for x in
+                            self.img_files]
+    
+
+    def cache_labels(self, path='labels.cache'):
+        # Cache dataset labels, check images and read shapes
+        x = {}  # dict
+        pbar = tqdm(zip(self.img_files, self.label_files), desc='Scanning images', total=len(self.img_files))
+        for (img, label) in pbar:
+            try:
+                l = []
+                image = Image.open(img)
+                image.verify()  # PIL verify
+                # _ = io.imread(img)  # skimage verify (from skimage import io)
+                shape = exif_size(image)  # image size
+                assert (shape[0] > 9) & (shape[1] > 9), 'image size <10 pixels'
+                if os.path.isfile(label):
+                    image  = Image.open(label)
+                    image2 = Image.open(label.replace('SegmentationObject','SegmentationClass'))
+                    tr = transforms.ToTensor()
+                    tr2 = transforms.ToPILImage()
+                    # FIXME 
+                    # Take :dict objects: from txt file, not hardcoded
+                    objects = {
+                        '[128 128   0]':1,#'Pillar',
+                        '[128   0   0]':2,#'Hood',
+                        '[  0 128   0]':3,#'Beam',
+                        '[0 0 0]':4,#'Background'
+                    }
+                    i=0
+                    while True:
+                        i+=1
+                        im1 = image.quantize(colors=i,method=2)
+                        im2 = image.quantize(colors=i+1,method=2)
+                        difference = ImageChops.difference(im2, im1)
+                        bbox = (tr2((tr(difference)).permute(1,2,0).squeeze())).getbbox()
+                        
+                        cls = np.array(image2)[np.array(difference)>0]
+                        
+                        cls = objects[str(cls[0])]
+                        
+                        if bbox == (0, 0, image[0], image[1]):
+                            break
+                        bbox = list(bbox)
+                        bbox.insert(0,cls)
+                        l.append(bbox)
+                if len(l) == 0:
+                    l = np.zeros((0, 5), dtype=np.float32)
+                x[img] = [l, shape]
+            except Exception as e:
+                x[img] = None
+                print('WARNING: %s: %s' % (img, e))
+
+        x['hash'] = get_hash(self.label_files + self.img_files)
+        torch.save(x, path)  # save for next time
+        return x
+
