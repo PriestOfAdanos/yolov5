@@ -10,9 +10,11 @@ from threading import Thread
 import cv2
 import numpy as np
 import torch
-from PIL import Image, ExifTags
+from torchvision import transforms
+from PIL import Image, ExifTags, ImageChops
 from torch.utils.data import Dataset
 from tqdm import tqdm
+
 
 from utils.utils import xyxy2xywh, xywh2xyxy, torch_distributed_zero_first
 
@@ -65,8 +67,8 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                              batch_size=batch_size,
                                              num_workers=nw,
                                              sampler=train_sampler,
-                                             pin_memory=True,
-                                             collate_fn=LoadImagLoadImagesAndGenerateLabelsFromSegMaskesAndLabels.collate_fn)
+                                             pin_memory=True, 
+                                             collate_fn=LoadImagesAndGenerateLabelsFromSegMask.collate_fn)
     return dataloader, dataset
 
 
@@ -303,6 +305,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                         f += [x.replace('./', parent) if x.startswith('./') else x for x in t]  # local to global path
                 elif os.path.isdir(p):  # folder
                     f += glob.iglob(p + os.sep + '*.*')
+
                 else:
                     raise Exception('%s does not exist' % p)
             self.img_files = sorted([x.replace('/', os.sep) for x in f if os.path.splitext(x)[-1].lower() in img_formats])
@@ -328,7 +331,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         # Define labels
         self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.txt') for x in
                             self.img_files]
-
+        print(self.label_files[0:20])
         # Check cache
         cache_path = str(Path(self.label_files[0]).parent) + '.cache'  # cached labels
         if os.path.isfile(cache_path):
@@ -340,6 +343,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         # Get labels
         labels, shapes = zip(*[cache[x] for x in self.img_files])
+        print(labels[0:20])
+        print(shapes[0:20])
         self.shapes = np.array(shapes, dtype=np.float64)
         self.labels = list(labels)
 
@@ -451,6 +456,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 if os.path.isfile(label):
                     with open(label, 'r') as f:
                         l = np.array([x.split() for x in f.read().splitlines()], dtype=np.float32)  # labels
+                        print(l)
                 if len(l) == 0:
                     l = np.zeros((0, 5), dtype=np.float32)
                 x[img] = [l, shape]
@@ -909,13 +915,154 @@ def create_folder(path='./new_folder'):
 
 
 class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
-    def __init__(self,self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
+    def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_images=False, single_cls=False, stride=32, pad=0.0):
-        super().__init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
-                 cache_images=False, single_cls=False, stride=32, pad=0.0)
+        try:
+            f = []  # image files
+            for p in path if isinstance(path, list) else [path]:
+                p = str(Path(p))  # os-agnostic
+                parent = str(Path(p).parent) + os.sep
+                if os.path.isfile(p):  # file
+                    with open(p, 'r') as t:
+                        t = t.read().splitlines()
+                        f += [x.replace('./', parent) if x.startswith('./') else x for x in t]  # local to global path
+                elif os.path.isdir(p):  # folder
+                    f += glob.iglob(p + os.sep + '*.*')
 
-    self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.png') for x in
+                else:
+                    raise Exception('%s does not exist' % p)
+            self.img_files = sorted([x.replace('/', os.sep) for x in f if os.path.splitext(x)[-1].lower() in img_formats])
+        except Exception as e:
+            raise Exception('Error loading data from %s: %s\nSee %s' % (path, e, help_url))
+
+        n = len(self.img_files)
+        assert n > 0, 'No images found in %s. See %s' % (path, help_url)
+        bi = np.floor(np.arange(n) / batch_size).astype(np.int)  # batch index
+        nb = bi[-1] + 1  # number of batches
+
+        self.n = n  # number of images
+        self.batch = bi  # batch index of image
+        self.img_size = img_size
+        self.augment = augment
+        self.hyp = hyp
+        self.image_weights = image_weights
+        self.rect = False if image_weights else rect
+        self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
+        self.mosaic_border = [-img_size // 2, -img_size // 2]
+        self.stride = stride
+
+        # Define labels
+        #print(self.img_files[0])
+        self.label_files = [
+            x.replace('images', 'labels').replace('train', 'train/SegmentationObject').replace(os.path.splitext(x)[-1], '.png') for x in
                             self.img_files]
+
+        # Check cache
+        cache_path = str(Path(self.label_files[0]).parent) + '.cache'  # cached labels
+        cache = self.cache_labels(cache_path)  # re-cache
+
+        # Get labels
+        labels, shapes = zip(*[cache[x] for x in self.img_files])
+        self.shapes = np.array(shapes, dtype=np.float64)
+        self.labels = list(labels)
+
+        # Rectangular Training  https://github.com/ultralytics/yolov3/issues/232
+        if self.rect:
+            #print('rect wyk')
+            # Sort by aspect ratio
+            s = self.shapes  # wh
+            ar = s[:, 1] / s[:, 0]  # aspect ratio
+            irect = ar.argsort()
+            self.img_files = [self.img_files[i] for i in irect]
+            self.label_files = [self.label_files[i] for i in irect]
+            self.labels = [self.labels[i] for i in irect]
+            self.shapes = s[irect]  # wh
+            ar = ar[irect]
+
+            # Set training image shapes
+            shapes = [[1, 1]] * nb
+            for i in range(nb):
+                ari = ar[bi == i]
+                mini, maxi = ari.min(), ari.max()
+                if maxi < 1:
+                    shapes[i] = [maxi, 1]
+                elif mini > 1:
+                    shapes[i] = [1, 1 / mini]
+
+            self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int) * stride
+
+        # Cache labels
+        create_datasubset, extract_bounding_boxes, labels_loaded = False, False, False
+        nm, nf, ne, ns, nd = 0, 0, 0, 0, 0  # number missing, found, empty, datasubset, duplicate
+        pbar = tqdm(self.label_files)
+        
+        for i, file in enumerate(pbar):
+            l = self.labels[i]  # label
+            print(file)
+            if l.shape[0]:
+                assert l.shape[1] == 5, '> 5 label columns: %s' % file
+                assert (l >= 0).all(), 'negative labels: %s' % file
+                assert (l[:, 1:] <= 1).all(), 'non-normalized or out of bounds coordinate labels: %s' % file
+                if np.unique(l, axis=0).shape[0] < l.shape[0]:  # duplicate rows
+                    nd += 1  # print('WARNING: duplicate rows in %s' % self.label_files[i])  # duplicate rows
+                if single_cls:
+                    l[:, 0] = 0  # force dataset into single-class mode
+                self.labels[i] = l
+                nf += 1  # file found
+
+                # Create subdataset (a smaller dataset)
+                if create_datasubset and ns < 1E4:
+                    if ns == 0:
+                        create_folder(path='./datasubset')
+                        os.makedirs('./datasubset/images')
+                    exclude_classes = 43
+                    if exclude_classes not in l[:, 0]:
+                        ns += 1
+                        # shutil.copy(src=self.img_files[i], dst='./datasubset/images/')  # copy image
+                        with open('./datasubset/images.txt', 'a') as f:
+                            f.write(self.img_files[i] + '\n')
+
+                # Extract object detection boxes for a second stage classifier
+                if extract_bounding_boxes:
+                    p = Path(self.img_files[i])
+                    img = cv2.imread(str(p))
+                    h, w = img.shape[:2]
+                    for j, x in enumerate(l):
+                        f = '%s%sclassifier%s%g_%g_%s' % (p.parent.parent, os.sep, os.sep, x[0], j, p.name)
+                        if not os.path.exists(Path(f).parent):
+                            os.makedirs(Path(f).parent)  # make new output folder
+
+                        b = x[1:] * [w, h, w, h]  # box
+                        b[2:] = b[2:].max()  # rectangle to square
+                        b[2:] = b[2:] * 1.3 + 30  # pad
+                        b = xywh2xyxy(b.reshape(-1, 4)).ravel().astype(np.int)
+
+                        b[[0, 2]] = np.clip(b[[0, 2]], 0, w)  # clip boxes outside of image
+                        b[[1, 3]] = np.clip(b[[1, 3]], 0, h)
+                        assert cv2.imwrite(f, img[b[1]:b[3], b[0]:b[2]]), 'Failure extracting classifier boxes'
+            else:
+                ne += 1  # print('empty labels for image %s' % self.img_files[i])  # file empty
+                # os.system("rm '%s' '%s'" % (self.img_files[i], self.label_files[i]))  # remove
+
+            pbar.desc = 'Scanning labels %s (%g found, %g missing, %g empty, %g duplicate, for %g images)' % (
+                cache_path, nf, nm, ne, nd, n)
+        if nf == 0:
+            s = 'WARNING: No labels found in %s. See %s' % (os.path.dirname(file) + os.sep, help_url)
+            print(s)
+            #assert not augment, '%s. Can not train without labels.' % s
+
+        # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
+        self.imgs = [None] * n
+        if cache_images:
+            gb = 0  # Gigabytes of cached images
+            pbar = tqdm(range(len(self.img_files)), desc='Caching images')
+            self.img_hw0, self.img_hw = [None] * n, [None] * n
+            for i in pbar:  # max 10k images
+                self.imgs[i], self.img_hw0[i], self.img_hw[i] = load_image(self, i)  # img, hw_original, hw_resized
+                gb += self.imgs[i].nbytes
+                pbar.desc = 'Caching images (%.1fGB)' % (gb / 1E9)
+
+        
     
 
     def cache_labels(self, path='labels.cache'):
@@ -933,33 +1080,7 @@ class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
                 if os.path.isfile(label):
                     image  = Image.open(label)
                     image2 = Image.open(label.replace('SegmentationObject','SegmentationClass'))
-                    tr = transforms.ToTensor()
-                    tr2 = transforms.ToPILImage()
-                    # FIXME 
-                    # Take :dict objects: from txt file, not hardcoded
-                    objects = {
-                        '[128 128   0]':1,#'Pillar',
-                        '[128   0   0]':2,#'Hood',
-                        '[  0 128   0]':3,#'Beam',
-                        '[0 0 0]':4,#'Background'
-                    }
-                    i=0
-                    while True:
-                        i+=1
-                        im1 = image.quantize(colors=i,method=2)
-                        im2 = image.quantize(colors=i+1,method=2)
-                        difference = ImageChops.difference(im2, im1)
-                        bbox = (tr2((tr(difference)).permute(1,2,0).squeeze())).getbbox()
-                        
-                        cls = np.array(image2)[np.array(difference)>0]
-                        
-                        cls = objects[str(cls[0])]
-                        
-                        if bbox == (0, 0, image[0], image[1]):
-                            break
-                        bbox = list(bbox)
-                        bbox.insert(0,cls)
-                        l.append(bbox)
+                    l = self.generate_bbox(image,image2)
                 if len(l) == 0:
                     l = np.zeros((0, 5), dtype=np.float32)
                 x[img] = [l, shape]
@@ -968,6 +1089,55 @@ class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
                 print('WARNING: %s: %s' % (img, e))
 
         x['hash'] = get_hash(self.label_files + self.img_files)
-        torch.save(x, path)  # save for next time
+        #torch.save(x, path)  # save for next time
         return x
 
+    
+
+
+    def generate_bbox(self,SegmObj, SegmCls):
+
+        image = SegmObj
+        image2 = SegmCls
+        l = np.zeros((1,5))
+
+        tr = transforms.ToTensor()
+        tr2 = transforms.ToPILImage()
+        # FIXME 
+        # Take :dict objects: from txt file, not hardcoded
+        objects = {
+            '[128 128   0]':0,#'Pillar',
+            '[128   0   0]':1,#'Hood',
+            '[  0 128   0]':2,#'Beam',
+            '[0 0 0]':3 # background, ignore
+        }
+
+        i=0
+        while True:
+            i+=1
+            im1 = image.quantize(colors=i,method=2)
+            im2 = image.quantize(colors=i+1,method=2)
+            difference = ImageChops.difference(im2, im1)
+            bbox = (tr2((tr(difference)).permute(1,2,0).squeeze())).getbbox()
+            
+            if bbox == (0, 0, image.size[0], image.size[1]):
+                break
+
+            cls = np.array(image2)[np.array(difference)>0]
+            cls = objects[str(cls[0])]
+
+            if cls == 3:
+                continue
+            
+            bbox = np.array(bbox)
+            bbox = np.divide(bbox, np.array(image.size*2))
+            bbox = np.insert(bbox, 0, cls)
+            #print(bbox)
+            bbox[3] -= bbox[1]
+            bbox[4] -= bbox[2]
+            bbox = np.expand_dims(bbox, axis=0)
+            
+            l = np.append(l, bbox,axis = 0)
+            l = np.delete(l, (0), axis=0)
+        return l 
+                    
