@@ -1053,8 +1053,6 @@ class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
                 gb += self.imgs[i].nbytes
                 pbar.desc = 'Caching images (%.1fGB)' % (gb / 1E9)
 
-        
-    
 
     def cache_labels(self, path='labels.cache'):
         # Cache dataset labels, check images and read shapes
@@ -1083,9 +1081,94 @@ class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
         #torch.save(x, path)  # save for next time
         return x
 
+        
+    def __getitem__(self, index):
+        if self.image_weights:
+            index = self.indices[index]
+
+        hyp = self.hyp
+        if self.mosaic:
+            # Load mosaic
+            img, labels = load_mosaic(self, index)
+            shapes = None
+
+            # MixUp https://arxiv.org/pdf/1710.09412.pdf
+            # if random.random() < 0.5:
+            #     img2, labels2 = load_mosaic(self, random.randint(0, len(self.labels) - 1))
+            #     r = np.random.beta(0.3, 0.3)  # mixup ratio, alpha=beta=0.3
+            #     img = (img * r + img2 * (1 - r)).astype(np.uint8)
+            #     labels = np.concatenate((labels, labels2), 0)
+
+        else:
+            # Load image
+            img, (h0, w0), (h, w) = load_image(self, index)
+
+            # Letterbox
+            shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
+            img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
+            shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
+
+            # Load labels
+            labels = []
+            x = self.labels[index]
+            if x.size > 0:
+                # Normalized xywh to pixel xyxy format
+                labels = x.copy()
+                labels[:, 1] = ratio[0] * w * (x[:, 1] - x[:, 3] / 2) + pad[0]  # pad width
+                labels[:, 2] = ratio[1] * h * (x[:, 2] - x[:, 4] / 2) + pad[1]  # pad height
+                labels[:, 3] = ratio[0] * w * (x[:, 1] + x[:, 3] / 2) + pad[0]
+                labels[:, 4] = ratio[1] * h * (x[:, 2] + x[:, 4] / 2) + pad[1]
+
+        if self.augment:
+            # Augment imagespace
+            if not self.mosaic:
+                img, labels = random_affine(img, labels,
+                                            degrees=hyp['degrees'],
+                                            translate=hyp['translate'],
+                                            scale=hyp['scale'],
+                                            shear=hyp['shear'])
+
+            # Augment colorspace
+            augment_hsv(img, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
+
+            # Apply cutouts
+            # if random.random() < 0.9:
+            #     labels = cutout(img, labels)
+
+        nL = len(labels)  # number of labels
+        if nL:
+            # convert xyxy to xywh
+            labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])
+
+            # Normalize coordinates 0 - 1
+            labels[:, [2, 4]] /= img.shape[0]  # height
+            labels[:, [1, 3]] /= img.shape[1]  # width
+
+        if self.augment:
+            # random left-right flip
+            lr_flip = True
+            if lr_flip and random.random() < 0.5:
+                img = np.fliplr(img)
+                if nL:
+                    labels[:, 1] = 1 - labels[:, 1]
+
+            # random up-down flip
+            ud_flip = False
+            if ud_flip and random.random() < 0.5:
+                img = np.flipud(img)
+                if nL:
+                    labels[:, 2] = 1 - labels[:, 2]
+
+        labels_out = torch.zeros((nL, 6))
+        if nL:
+            labels_out[:, 1:] = torch.from_numpy(labels)
+
+        # Convert
+        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+        img = np.ascontiguousarray(img)
+
+        return torch.from_numpy(img), labels_out, self.img_files[index], shapes
     
-
-
     def generate_bbox(self,SegmObj, SegmCls):
 
         image = SegmObj
