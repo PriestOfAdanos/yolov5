@@ -52,7 +52,7 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                       local_rank=-1, world_size=1):
     # Make sure only the first process in DDP process the dataset first, and the following others can use the cache.
     with torch_distributed_zero_first(local_rank):
-<<<<<<< HEAD
+#<<<<<<< HEAD
         dataset = LoadImagesAndGenerateLabelsFromSegMask(path, imgsz, batch_size,
                                     augment=augment,  # augment images
                                     hyp=hyp,  # augmentation hyperparameters
@@ -61,16 +61,16 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                     single_cls=opt.single_cls,
                                     stride=int(stride),
                                     pad=pad)
-=======
-        dataset = LoadImagesAndLabels(path, imgsz, batch_size,
-                                      augment=augment,  # augment images
-                                      hyp=hyp,  # augmentation hyperparameters
-                                      rect=rect,  # rectangular training
-                                      cache_images=cache,
-                                      single_cls=opt.single_cls,
-                                      stride=int(stride),
-                                      pad=pad)
->>>>>>> 4b5f4806bcd513b18171034c06364432ef2c19c2
+#=======
+#         dataset = LoadImagesAndLabels(path, imgsz, batch_size,
+#                                       augment=augment,  # augment images
+#                                       hyp=hyp,  # augmentation hyperparameters
+#                                       rect=rect,  # rectangular training
+#                                       cache_images=cache,
+#                                       single_cls=opt.single_cls,
+#                                       stride=int(stride),
+#                                       pad=pad)
+#>>>>>>> 4b5f4806bcd513b18171034c06364432ef2c19c2
 
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, 8])  # number of workers
@@ -441,7 +441,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         if nf == 0:
             s = 'WARNING: No labels found in %s. See %s' % (os.path.dirname(file) + os.sep, help_url)
             print(s)
-            assert not augment, '%s. Can not train without labels.' % s
+            # assert not augment, '%s. Can not train without labels.' % s
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
         self.imgs = [None] * n
@@ -526,10 +526,6 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 labels[:, 2] = ratio[1] * h * (x[:, 2] - x[:, 4] / 2) + pad[1]  # pad height
                 labels[:, 3] = ratio[0] * w * (x[:, 1] + x[:, 3] / 2) + pad[0]
                 labels[:, 4] = ratio[1] * h * (x[:, 2] + x[:, 4] / 2) + pad[1]
-
-        if self.augment:
-            # Augment imagespace
-            if not self.mosaic:
                 img, labels = random_affine(img, labels,
                                             degrees=hyp['degrees'],
                                             translate=hyp['translate'],
@@ -593,7 +589,7 @@ def load_image(self, index):
         path = self.img_files[index]
         img = cv2.imread(path)  # BGR
         assert img is not None, 'Image Not Found ' + path
-        h0, w0 = img.shape[:2]  # orig hw
+        h0, w0 = img.shape[:2]  # orig hw;
         r = self.img_size / max(h0, w0)  # resize image to img_size
         if r != 1:  # always resize down, only resize up if training with augmentation
             interp = cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR
@@ -1055,11 +1051,16 @@ class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
 
 
     def cache_labels(self, path='labels.cache'):
+        # TODO 
+
+        # - Make it accept randomly generated data
+
         # Cache dataset labels, check images and read shapes
         x = {}  # dict
         pbar = tqdm(zip(self.img_files, self.label_files), desc='Scanning images', total=len(self.img_files))
+
         for (img, label) in pbar:
-            try:
+            #try:
                 l = []
                 image = Image.open(img)
                 image.verify()  # PIL verify
@@ -1073,9 +1074,9 @@ class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
                 if len(l) == 0:
                     l = np.zeros((0, 5), dtype=np.float32)
                 x[img] = [l, shape]
-            except Exception as e:
-                x[img] = None
-                print('WARNING: %s: %s' % (img, e))
+            # except Exception as e:
+            #     x[img] = None
+            #     print('WARNING: %s: %s' % (img, e))
 
         x['hash'] = get_hash(self.label_files + self.img_files)
         #torch.save(x, path)  # save for next time
@@ -1177,28 +1178,20 @@ class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
 
         tr = transforms.ToTensor()
         tr2 = transforms.ToPILImage()
-        # FIXME 
-        # Take :dict objects: from txt file, not hardcoded
-        objects = {
-            '[128 128   0]':0,#'Pillar',
-            '[128   0   0]':1,#'Hood',
-            '[  0 128   0]':2,#'Beam',
-            '[0 0 0]':3 # background, ignore
-        }
-
+    
         i=0
         while True:
             i+=1
             im1 = image.quantize(colors=i,method=2)
             im2 = image.quantize(colors=i+1,method=2)
             difference = ImageChops.difference(im2, im1)
-            bbox = (tr2((tr(difference)).permute(1,2,0).squeeze())).getbbox()
+            bbox = difference.getbbox()
             
             if bbox == (0, 0, image.size[0], image.size[1]):
                 break
 
-            cls = np.array(image2)[np.array(difference)>0]
-            cls = objects[str(cls[0])]
+            cls = np.array(image2)[np.array(difference)>0][0]
+            cls = get_cls(cls)
 
             if cls == 3:
                 continue
@@ -1210,8 +1203,24 @@ class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
             bbox[3] -= bbox[1]
             bbox[4] -= bbox[2]
             bbox = np.expand_dims(bbox, axis=0)
-            
             l = np.append(l, bbox,axis = 0)
-            l = np.delete(l, (0), axis=0)
+        l = np.delete(l, (0), axis=0)
         return l 
                     
+def get_cls(x):
+    #print(x)
+    if isinstance(x, np.ndarray):
+
+        if x[0]==x[1] and x[2]==0:
+            return 0
+        if x[1]==0 and x[2]==0 and x[0]!=0:
+            return 1
+        if x[0]==0 and x[1]!=0 and x[2]==0:
+            return 2
+    if isinstance(x,np.uint8):
+        print(x)
+        return abs(x-1)
+    return 3
+    
+
+
