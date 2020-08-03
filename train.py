@@ -14,6 +14,9 @@ from utils import google_utils
 from utils.datasets import *
 from utils.utils import *
 
+from trains import Task
+task = Task.init(project_name="yolov5", task_name="yolov5x")
+
 mixed_precision = True
 try:  # Mixed precision training https://github.com/NVIDIA/apex
     from apex import amp

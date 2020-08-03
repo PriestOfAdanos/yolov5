@@ -16,7 +16,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
-from utils.utils import xyxy2xywh, xywh2xyxy, torch_distributed_zero_first
+from utils.utils import xyxy2xywh, xywh2xyxy, torch_distributed_zero_first, plot_one_box, scale_coords
 
 help_url = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
 img_formats = ['.bmp', '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.dng']
@@ -1197,20 +1197,16 @@ class LoadImagesAndGenerateLabelsFromSegMask(LoadImagesAndLabels):
                 continue
             
             bbox = np.array(bbox)
-            bbox = np.divide(bbox, np.array(image.size*2))
             bbox = np.insert(bbox, 0, cls)
-            #print(bbox)
-            bbox[3] -= bbox[1]
-            bbox[4] -= bbox[2]
             bbox = np.expand_dims(bbox, axis=0)
             l = np.append(l, bbox,axis = 0)
         l = np.delete(l, (0), axis=0)
+        l[:,1:] = xyxy2xywh(l[:,1:])/(image.size*2)
         return l 
                     
 def get_cls(x):
     #print(x)
     if isinstance(x, np.ndarray):
-
         if x[0]==x[1] and x[2]==0:
             return 0
         if x[1]==0 and x[2]==0 and x[0]!=0:
@@ -1218,7 +1214,6 @@ def get_cls(x):
         if x[0]==0 and x[1]!=0 and x[2]==0:
             return 2
     if isinstance(x,np.uint8):
-        print(x)
         return abs(x-1)
     return 3
     
