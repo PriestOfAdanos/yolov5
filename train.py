@@ -164,8 +164,7 @@ def train(hyp, tb_writer, opt, device):
     # Scheduler https://arxiv.org/pdf/1812.01187.pdf
     lf = lambda x: (((1 + math.cos(x * math.pi / epochs)) / 2) ** 1.0) * 0.8 + 0.2  # cosine
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
-    # https://discuss.pytorch.org/t/a-problem-occured-when-resuming-an-optimizer/28822
-    # plot_lr_scheduler(optimizer, scheduler, epochs)
+    # https://discuss.pytorch.org/t/
 
     # DP mode
     if device.type != 'cpu' and rank == -1 and torch.cuda.device_count() > 1:
