@@ -25,7 +25,7 @@
 
 storage.googleapis.com
 runs/*
-data/*
+
 !data/samples/zidane.jpg
 !data/samples/bus.jpg
 !data/coco.names
@@ -53,6 +53,7 @@ gcp_test*.sh
 *.torchscript
 darknet53.conv.74
 yolov3-tiny.conv.15
+/results
 
 # GitHub Python GitIgnore ----------------------------------------------------------------------------------------------
 # Byte-compiled / optimized / DLL files
